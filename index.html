@@ -2,20 +2,22 @@
 <script>
 (function () {
   const OriginalWorker = window.Worker;
-  let outCount = 0, inCount = 0;
+  let inCount = 0;
 
-  function decodeBuffer(buf) {
-    try {
-      if (!(buf instanceof ArrayBuffer)) return buf;
-      const bytes = Array.from(new Uint8Array(buf));
-      const floatCount = Math.floor(buf.byteLength / 4);
-      const floats = floatCount > 0
-        ? Array.from(new Float32Array(buf, 0, floatCount)).map(n => Math.round(n * 1000) / 1000)
-        : [];
-      return { byteLength: buf.byteLength, bytes, floatsIfAligned: floats };
-    } catch (e) {
-      return 'decode-error: ' + e.message;
+  function tryFloatOffsets(bytes) {
+    // Try reading the byte array as float32s starting at every possible
+    // byte offset (0..3), so we can compare against the on-screen speed.
+    const results = {};
+    for (let offset = 0; offset < 4; offset++) {
+      const usable = bytes.length - offset;
+      const floatCount = Math.floor(usable / 4);
+      if (floatCount <= 0) { results['offset' + offset] = []; continue; }
+      const slice = bytes.slice(offset, offset + floatCount * 4);
+      const floats = Array.from(new Float32Array(slice.buffer, slice.byteOffset, floatCount))
+        .map(n => Math.round(n * 100) / 100);
+      results['offset' + offset] = floats;
     }
+    return results;
   }
 
   window.Worker = function (...args) {
@@ -25,32 +27,26 @@
 
     worker.postMessage = function (msg, ...rest) {
       try {
-        if (msg && typeof msg.messageType !== 'undefined') {
-          if (msg.messageType === 3) {
-            console.log('[SPY] -> INIT (messageType 3), keys:', Object.keys(msg));
-          } else {
-            outCount++;
-            if (outCount % 60 === 0) {
-              console.log('[SPY] -> msg (type ' + msg.messageType + '):', msg);
-            }
-          }
+        if (msg && msg.messageType === 6) {
+          // ControlCar - log every input change
+          console.log('[SPY] -> ControlCar:', {up: msg.up, right: msg.right, down: msg.down, left: msg.left, reset: msg.reset});
         }
-      } catch (e) { console.log('[SPY] log error (safe to ignore):', e); }
+      } catch (e) {}
       return originalPostMessage(msg, ...rest);
     };
 
     worker.addEventListener('message', (e) => {
       try {
         const data = e.data;
-        if (data && typeof data.messageType !== 'undefined') {
-          if (data.messageType === 10 && data.carStateBuffers) {
-            inCount++;
-            if (inCount % 60 === 0) {
-              const decoded = data.carStateBuffers.map(decodeBuffer);
-              console.log('[SPY] <- STATE decoded:', JSON.stringify(decoded));
+        if (data && data.messageType === 10 && data.carStateBuffers) {
+          inCount++;
+          if (inCount % 30 === 0) {
+            for (const buf of data.carStateBuffers) {
+              const allBytes = new Uint8Array(buf);
+              const carId = allBytes[0] | (allBytes[1] << 8) | (allBytes[2] << 16) | (allBytes[3] << 24);
+              const rest = allBytes.slice(4);
+              console.log('[SPY] carId:', carId, 'restBytes:', Array.from(rest), 'floatAttempts:', tryFloatOffsets(rest));
             }
-          } else {
-            console.log('[SPY] <- msg (type ' + data.messageType + '):', data);
           }
         }
       } catch (err) { console.log('[SPY] log error (safe to ignore):', err); }
