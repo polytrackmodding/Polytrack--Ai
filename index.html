@@ -1,21 +1,36 @@
-<!doctype html><html><head><meta charset="utf-8"><link rel="preload" href="forced_square.woff2" as="font" type="font/woff2" crossorigin="anonymous"/><link rel="preload" href="images/logo.svg" as="image" type="image/svg+xml"/><link rel="preload" href="images/discord.svg" as="image" type="image/svg+xml"/><link rel="manifest" href="manifest.json"/><meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <script>
 (function () {
   const OriginalWorker = window.Worker;
+  let outCount = 0, inCount = 0;
   window.Worker = function (...args) {
     console.log('[SPY] worker created:', args);
     const worker = new OriginalWorker(...args);
     const originalPostMessage = worker.postMessage.bind(worker);
     worker.postMessage = function (msg, ...rest) {
-      console.log('[SPY] -> worker:', msg);
+      if (msg && msg.messageType === 3) {
+        console.log('[SPY] -> INIT (messageType 3), keys:', Object.keys(msg));
+      } else {
+        outCount++;
+        if (outCount % 60 === 0) {
+          console.log('[SPY] -> input:', JSON.parse(JSON.stringify(msg)));
+        }
+      }
       return originalPostMessage(msg, ...rest);
     };
     worker.addEventListener('message', (e) => {
-      console.log('[SPY] <- worker:', e.data);
+      const data = e.data;
+      if (data && data.messageType === 10 && data.carStateBuffers) {
+        inCount++;
+        if (inCount % 60 === 0) {
+          const decoded = data.carStateBuffers.map(buf => Array.from(buf));
+          console.log('[SPY] <- STATE decoded:', JSON.stringify(decoded));
+        }
+      } else {
+        console.log('[SPY] <- other:', data);
+      }
     });
     return worker;
   };
   window.Worker.prototype = OriginalWorker.prototype;
 })();
 </script>
-<script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
