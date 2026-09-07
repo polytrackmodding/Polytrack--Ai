@@ -3,35 +3,56 @@
 (function () {
   const OriginalWorker = window.Worker;
   let outCount = 0, inCount = 0;
+
+  function decodeBuffer(buf) {
+    try {
+      if (buf instanceof ArrayBuffer) {
+        return { byteLength: buf.byteLength, floats: Array.from(new Float32Array(buf)) };
+      }
+      return buf;
+    } catch (e) {
+      return 'decode-error: ' + e.message;
+    }
+  }
+
   window.Worker = function (...args) {
     try { console.log('[SPY] worker created:', args); } catch (e) {}
     const worker = new OriginalWorker(...args);
     const originalPostMessage = worker.postMessage.bind(worker);
+
     worker.postMessage = function (msg, ...rest) {
       try {
-        if (msg && msg.messageType === 3) {
-          console.log('[SPY] -> INIT (messageType 3), keys:', Object.keys(msg));
-        } else {
-          outCount++;
-          if (outCount % 60 === 0) {
-            console.log('[SPY] -> input:', msg);
+        if (msg && typeof msg.messageType !== 'undefined') {
+          if (msg.messageType === 3) {
+            console.log('[SPY] -> INIT (messageType 3), keys:', Object.keys(msg));
+          } else {
+            outCount++;
+            if (outCount % 60 === 0) {
+              console.log('[SPY] -> msg (type ' + msg.messageType + '):', msg);
+            }
           }
         }
       } catch (e) { console.log('[SPY] log error (safe to ignore):', e); }
       return originalPostMessage(msg, ...rest);
     };
+
     worker.addEventListener('message', (e) => {
       try {
         const data = e.data;
-        if (data && data.messageType === 10 && data.carStateBuffers) {
-          inCount++;
-          if (inCount % 60 === 0) {
-            const decoded = data.carStateBuffers.map(buf => Array.from(buf));
-            console.log('[SPY] <- STATE decoded:', JSON.stringify(decoded));
+        if (data && typeof data.messageType !== 'undefined') {
+          if (data.messageType === 10 && data.carStateBuffers) {
+            inCount++;
+            if (inCount % 60 === 0) {
+              const decoded = data.carStateBuffers.map(decodeBuffer);
+              console.log('[SPY] <- STATE decoded:', JSON.stringify(decoded));
+            }
+          } else {
+            console.log('[SPY] <- msg (type ' + data.messageType + '):', data);
           }
         }
       } catch (err) { console.log('[SPY] log error (safe to ignore):', err); }
     });
+
     return worker;
   };
   window.Worker.prototype = OriginalWorker.prototype;
