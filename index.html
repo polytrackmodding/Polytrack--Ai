@@ -6,10 +6,13 @@
 
   function decodeBuffer(buf) {
     try {
-      if (buf instanceof ArrayBuffer) {
-        return { byteLength: buf.byteLength, floats: Array.from(new Float32Array(buf)) };
-      }
-      return buf;
+      if (!(buf instanceof ArrayBuffer)) return buf;
+      const bytes = Array.from(new Uint8Array(buf));
+      const floatCount = Math.floor(buf.byteLength / 4);
+      const floats = floatCount > 0
+        ? Array.from(new Float32Array(buf, 0, floatCount)).map(n => Math.round(n * 1000) / 1000)
+        : [];
+      return { byteLength: buf.byteLength, bytes, floatsIfAligned: floats };
     } catch (e) {
       return 'decode-error: ' + e.message;
     }
