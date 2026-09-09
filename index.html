@@ -1,19 +1,30 @@
 <!doctype html><html><head><meta charset="utf-8"><link rel="preload" href="forced_square.woff2" as="font" type="font/woff2" crossorigin="anonymous"/><link rel="preload" href="images/logo.svg" as="image" type="image/svg+xml"/><link rel="preload" href="images/discord.svg" as="image" type="image/svg+xml"/><link rel="manifest" href="manifest.json"/><meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <script>
 (function () {
-  const OriginalMapSet = Map.prototype.set;
-  let logCount = 0;
+  const state = {};
+  let workerRef = null;
 
+  const OriginalWorker = window.Worker;
+  window.Worker = function (...args) {
+    const w = new OriginalWorker(...args);
+    try {
+      if (args[0] && String(args[0]).includes('simulation_worker')) {
+        workerRef = w;
+        console.log('[PolyAI] captured simulation worker reference');
+      }
+    } catch (e) {}
+    return w;
+  };
+  window.Worker.prototype = OriginalWorker.prototype;
+
+  const OriginalMapSet = Map.prototype.set;
   Map.prototype.set = function (key, value) {
     if (typeof value === 'function' && !value.__isSpyWrapped) {
       const wrapped = function (...args) {
         try {
           const arg = args[0];
           if (arg && typeof arg === 'object' && 'speedKmh' in arg && 'position' in arg) {
-            logCount++;
-            if (logCount % 30 === 0) {
-              console.log('[SPY] CAR STATE FULL:', JSON.stringify(arg));
-            }
+            state[key] = arg;
           }
         } catch (e) {}
         return value.apply(this, args);
@@ -23,6 +34,23 @@
     }
     return OriginalMapSet.call(this, key, value);
   };
+
+  window.PolyAI = {
+    getState(carId) {
+      if (carId !== undefined) return state[carId];
+      const ids = Object.keys(state);
+      return ids.length ? state[ids[0]] : null;
+    },
+    getCarIds() {
+      return Object.keys(state).map(Number);
+    },
+    control(carId, { up = false, right = false, down = false, left = false, reset = false } = {}) {
+      if (!workerRef) { console.warn('[PolyAI] worker not ready yet'); return; }
+      workerRef.postMessage({ messageType: 6, carId, up, right, down, left, reset });
+    }
+  };
+
+  console.log('[PolyAI] ready. Try: PolyAI.getCarIds(), PolyAI.getState(id), PolyAI.control(id, {up:true})');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
