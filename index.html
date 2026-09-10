@@ -1,8 +1,9 @@
-<!doctype html><html><head><meta charset="utf-8"><link rel="preload" href="forced_square.woff2" as="font" type="font/woff2" crossorigin="anonymous"/><link rel="preload" href="images/logo.svg" as="image" type="image/svg+xml"/><link rel="preload" href="images/discord.svg" as="image" type="image/svg+xml"/><link rel="manifest" href="manifest.json"/><meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
+<<!doctype html><html><head><meta charset="utf-8"><link rel="preload" href="forced_square.woff2" as="font" type="font/woff2" crossorigin="anonymous"/><link rel="preload" href="images/logo.svg" as="image" type="image/svg+xml"/><link rel="preload" href="images/discord.svg" as="image" type="image/svg+xml"/><link rel="manifest" href="manifest.json"/><meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <script>
 (function () {
   const state = {};
   const deadIds = new Set();
+  const startedIds = new Set();
   const workerRefs = [];
 
   const OriginalWorker = window.Worker;
@@ -12,13 +13,8 @@
       if (args[0] && String(args[0]).includes('simulation_worker')) {
         workerRefs.push(w);
         w.addEventListener('error', (e) => {
-          try {
-            const msg = e.message || '';
-            const match = msg.match(/car\s*(\d+)/i);
-            // Mark ALL known ids as suspect if we can't tell which one — safer to just clear everything.
-            console.warn('[PolyAI] worker error, clearing tracked cars:', msg);
-            for (const id of Object.keys(state)) deadIds.add(Number(id));
-          } catch (err) {}
+          console.warn('[PolyAI] worker error, clearing tracked cars:', e.message);
+          for (const id of Object.keys(state)) deadIds.add(Number(id));
         });
         console.log('[PolyAI] captured simulation worker #' + workerRefs.length);
       }
@@ -39,7 +35,7 @@
           const arg = args[0];
           if (arg && typeof arg === 'object' && 'speedKmh' in arg && 'position' in arg) {
             state[key] = arg;
-            deadIds.delete(key); // fresh data means it's alive again (new car reusing the id)
+            deadIds.delete(key);
           }
         } catch (e) {}
         return value.apply(this, args);
@@ -63,11 +59,6 @@
       const msg = { messageType: 6, carId, up, right, down, left, reset };
       for (const w of workerRefs) w.postMessage(msg);
     },
-    start(carId) {
-      if (!workerRefs.length || deadIds.has(carId)) return;
-      const msg = { messageType: 5, carId, targetSimulationTimeFrames: null };
-      for (const w of workerRefs) w.postMessage(msg);
-    },
     autoDriveEnabled: true
   };
 
@@ -76,7 +67,6 @@
     tick++;
     const ids = window.PolyAI.getCarIds();
     for (const id of ids) {
-      window.PolyAI.start(id);
       if (window.PolyAI.autoDriveEnabled) window.PolyAI.control(id, { up: true });
     }
     if (tick % 60 === 0 && ids.length) {
@@ -86,7 +76,7 @@
     }
   }, 16);
 
-  console.log('[PolyAI] ready (v4, dead-car tracking).');
+  console.log('[PolyAI] ready (v5, no repeated StartCar).');
 })();
 </script>
-<script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
+<script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>>
