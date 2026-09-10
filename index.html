@@ -17,27 +17,24 @@
   };
   window.Worker.prototype = OriginalWorker.prototype;
 
+  function isSmallInt(k) {
+    return typeof k === 'number' && Number.isInteger(k) && k >= 0 && k < 100000;
+  }
+
   const OriginalMapSet = Map.prototype.set;
   Map.prototype.set = function (key, value) {
-    if (typeof value === 'function' && !value.__isSpyWrapped) {
-      let looksLikeCarCallback = false;
-      try {
-        const src = Function.prototype.toString.call(value);
-        looksLikeCarCallback = src.includes('quaternion') || (src.includes('speedKmh') && src.includes('position'));
-      } catch (e) {}
-      if (looksLikeCarCallback) {
-        const wrapped = function (...args) {
-          try {
-            const arg = args[0];
-            if (arg && typeof arg === 'object' && 'speedKmh' in arg && 'position' in arg) {
-              state[key] = arg;
-            }
-          } catch (e) {}
-          return value.apply(this, args);
-        };
-        wrapped.__isSpyWrapped = true;
-        return OriginalMapSet.call(this, key, wrapped);
-      }
+    if (isSmallInt(key) && typeof value === 'function' && !value.__isSpyWrapped) {
+      const wrapped = function (...args) {
+        try {
+          const arg = args[0];
+          if (arg && typeof arg === 'object' && 'speedKmh' in arg && 'position' in arg) {
+            state[key] = arg;
+          }
+        } catch (e) {}
+        return value.apply(this, args);
+      };
+      wrapped.__isSpyWrapped = true;
+      return OriginalMapSet.call(this, key, wrapped);
     }
     return OriginalMapSet.call(this, key, value);
   };
@@ -63,27 +60,22 @@
     autoDriveEnabled: true
   };
 
-  // Automatically drive every known car forward, continuously, 60x/sec.
-  // Also print status once a second so we can SEE whether frames/speed change.
   let tick = 0;
   setInterval(() => {
     tick++;
     const ids = Object.keys(state).map(Number);
     for (const id of ids) {
       window.PolyAI.start(id);
-      if (window.PolyAI.autoDriveEnabled) {
-        window.PolyAI.control(id, { up: true });
-      }
+      if (window.PolyAI.autoDriveEnabled) window.PolyAI.control(id, { up: true });
     }
     if (tick % 60 === 0) {
-      const report = ids.map(id => ({
+      console.log('[PolyAI] status:', JSON.stringify(ids.map(id => ({
         id, frames: state[id]?.frames, speedKmh: Math.round((state[id]?.speedKmh || 0) * 10) / 10
-      }));
-      console.log('[PolyAI] status:', JSON.stringify(report));
+      }))));
     }
   }, 16);
 
-  console.log('[PolyAI] ready — auto-driving all known cars forward automatically. Watch console for [PolyAI] status lines.');
+  console.log('[PolyAI] ready (v3, integer-key filter).');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
