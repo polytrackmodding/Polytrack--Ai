@@ -2,6 +2,7 @@
 <script>
 (function () {
   const state = {};
+  const deadIds = new Set();
   const workerRefs = [];
 
   const OriginalWorker = window.Worker;
@@ -10,6 +11,15 @@
     try {
       if (args[0] && String(args[0]).includes('simulation_worker')) {
         workerRefs.push(w);
+        w.addEventListener('error', (e) => {
+          try {
+            const msg = e.message || '';
+            const match = msg.match(/car\s*(\d+)/i);
+            // Mark ALL known ids as suspect if we can't tell which one — safer to just clear everything.
+            console.warn('[PolyAI] worker error, clearing tracked cars:', msg);
+            for (const id of Object.keys(state)) deadIds.add(Number(id));
+          } catch (err) {}
+        });
         console.log('[PolyAI] captured simulation worker #' + workerRefs.length);
       }
     } catch (e) {}
@@ -29,6 +39,7 @@
           const arg = args[0];
           if (arg && typeof arg === 'object' && 'speedKmh' in arg && 'position' in arg) {
             state[key] = arg;
+            deadIds.delete(key); // fresh data means it's alive again (new car reusing the id)
           }
         } catch (e) {}
         return value.apply(this, args);
@@ -45,15 +56,15 @@
       const ids = Object.keys(state);
       return ids.length ? state[ids[0]] : null;
     },
-    getCarIds() { return Object.keys(state).map(Number); },
+    getCarIds() { return Object.keys(state).map(Number).filter(id => !deadIds.has(id)); },
     getWorkerCount() { return workerRefs.length; },
     control(carId, { up = false, right = false, down = false, left = false, reset = false } = {}) {
-      if (!workerRefs.length) return;
+      if (!workerRefs.length || deadIds.has(carId)) return;
       const msg = { messageType: 6, carId, up, right, down, left, reset };
       for (const w of workerRefs) w.postMessage(msg);
     },
     start(carId) {
-      if (!workerRefs.length) return;
+      if (!workerRefs.length || deadIds.has(carId)) return;
       const msg = { messageType: 5, carId, targetSimulationTimeFrames: null };
       for (const w of workerRefs) w.postMessage(msg);
     },
@@ -63,19 +74,19 @@
   let tick = 0;
   setInterval(() => {
     tick++;
-    const ids = Object.keys(state).map(Number);
+    const ids = window.PolyAI.getCarIds();
     for (const id of ids) {
       window.PolyAI.start(id);
       if (window.PolyAI.autoDriveEnabled) window.PolyAI.control(id, { up: true });
     }
-    if (tick % 60 === 0) {
+    if (tick % 60 === 0 && ids.length) {
       console.log('[PolyAI] status:', JSON.stringify(ids.map(id => ({
         id, frames: state[id]?.frames, speedKmh: Math.round((state[id]?.speedKmh || 0) * 10) / 10
       }))));
     }
   }, 16);
 
-  console.log('[PolyAI] ready (v3, integer-key filter).');
+  console.log('[PolyAI] ready (v4, dead-car tracking).');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
