@@ -2,15 +2,15 @@
 <script>
 (function () {
   const state = {};
-  let workerRef = null;
+  const workerRefs = [];
 
   const OriginalWorker = window.Worker;
   window.Worker = function (...args) {
     const w = new OriginalWorker(...args);
     try {
       if (args[0] && String(args[0]).includes('simulation_worker')) {
-        workerRef = w;
-        console.log('[PolyAI] captured simulation worker reference');
+        workerRefs.push(w);
+        console.log('[PolyAI] captured simulation worker #' + workerRefs.length);
       }
     } catch (e) {}
     return w;
@@ -44,13 +44,17 @@
     getCarIds() {
       return Object.keys(state).map(Number);
     },
+    getWorkerCount() {
+      return workerRefs.length;
+    },
     control(carId, { up = false, right = false, down = false, left = false, reset = false } = {}) {
-      if (!workerRef) { console.warn('[PolyAI] worker not ready yet'); return; }
-      workerRef.postMessage({ messageType: 6, carId, up, right, down, left, reset });
+      if (!workerRefs.length) { console.warn('[PolyAI] no workers captured yet'); return; }
+      const msg = { messageType: 6, carId, up, right, down, left, reset };
+      for (const w of workerRefs) w.postMessage(msg);
     }
   };
 
-  console.log('[PolyAI] ready. Try: PolyAI.getCarIds(), PolyAI.getState(id), PolyAI.control(id, {up:true})');
+  console.log('[PolyAI] ready. Try: PolyAI.getCarIds(), PolyAI.getState(id), PolyAI.control(id, {up:true}), PolyAI.getWorkerCount()');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
