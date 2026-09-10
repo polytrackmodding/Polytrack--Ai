@@ -25,7 +25,6 @@
         const src = Function.prototype.toString.call(value);
         looksLikeCarCallback = src.includes('quaternion') || (src.includes('speedKmh') && src.includes('position'));
       } catch (e) {}
-
       if (looksLikeCarCallback) {
         const wrapped = function (...args) {
           try {
@@ -49,25 +48,42 @@
       const ids = Object.keys(state);
       return ids.length ? state[ids[0]] : null;
     },
-    getCarIds() {
-      return Object.keys(state).map(Number);
-    },
-    getWorkerCount() {
-      return workerRefs.length;
-    },
+    getCarIds() { return Object.keys(state).map(Number); },
+    getWorkerCount() { return workerRefs.length; },
     control(carId, { up = false, right = false, down = false, left = false, reset = false } = {}) {
-      if (!workerRefs.length) { console.warn('[PolyAI] no workers captured yet'); return; }
+      if (!workerRefs.length) return;
       const msg = { messageType: 6, carId, up, right, down, left, reset };
       for (const w of workerRefs) w.postMessage(msg);
     },
-    start(carId, targetSimulationTimeFrames = null) {
-      if (!workerRefs.length) { console.warn('[PolyAI] no workers captured yet'); return; }
-      const msg = { messageType: 5, carId, targetSimulationTimeFrames };
+    start(carId) {
+      if (!workerRefs.length) return;
+      const msg = { messageType: 5, carId, targetSimulationTimeFrames: null };
       for (const w of workerRefs) w.postMessage(msg);
-    }
+    },
+    autoDriveEnabled: true
   };
 
-  console.log('[PolyAI] ready.');
+  // Automatically drive every known car forward, continuously, 60x/sec.
+  // Also print status once a second so we can SEE whether frames/speed change.
+  let tick = 0;
+  setInterval(() => {
+    tick++;
+    const ids = Object.keys(state).map(Number);
+    for (const id of ids) {
+      window.PolyAI.start(id);
+      if (window.PolyAI.autoDriveEnabled) {
+        window.PolyAI.control(id, { up: true });
+      }
+    }
+    if (tick % 60 === 0) {
+      const report = ids.map(id => ({
+        id, frames: state[id]?.frames, speedKmh: Math.round((state[id]?.speedKmh || 0) * 10) / 10
+      }));
+      console.log('[PolyAI] status:', JSON.stringify(report));
+    }
+  }, 16);
+
+  console.log('[PolyAI] ready — auto-driving all known cars forward automatically. Watch console for [PolyAI] status lines.');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
