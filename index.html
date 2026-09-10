@@ -51,10 +51,15 @@
       if (!workerRefs.length) { console.warn('[PolyAI] no workers captured yet'); return; }
       const msg = { messageType: 6, carId, up, right, down, left, reset };
       for (const w of workerRefs) w.postMessage(msg);
+    },
+    start(carId, targetSimulationTimeFrames = null) {
+      if (!workerRefs.length) { console.warn('[PolyAI] no workers captured yet'); return; }
+      const msg = { messageType: 5, carId, targetSimulationTimeFrames };
+      for (const w of workerRefs) w.postMessage(msg);
     }
   };
 
-  console.log('[PolyAI] ready. Try: PolyAI.getCarIds(), PolyAI.getState(id), PolyAI.control(id, {up:true}), PolyAI.getWorkerCount()');
+  console.log('[PolyAI] ready. Try: PolyAI.getCarIds(), PolyAI.getState(id), PolyAI.start(id), PolyAI.control(id, {up:true})');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
