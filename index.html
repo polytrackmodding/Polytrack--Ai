@@ -83,7 +83,10 @@
     return w;
   }
   function makeBrain() {
-    return { w1: randWeights(N_INPUTS, 8), b1: new Array(8).fill(0), w2: randWeights(8, N_OUTPUTS), b2: new Array(N_OUTPUTS).fill(0) };
+    const w1 = randWeights(N_INPUTS, 8);
+    const w2 = randWeights(8, N_OUTPUTS);
+    for (let i = 0; i < 8; i++) w2[i][2] = -w2[i][1]; // start left/right unbiased
+    return { w1, b1: new Array(8).fill(0), w2, b2: new Array(N_OUTPUTS).fill(0) };
   }
   function cloneBrain(b) { return JSON.parse(JSON.stringify(b)); }
   function mutate(b, scale) {
@@ -106,31 +109,58 @@
       for (let i = 0; i < 8; i++) sum += h[i] * brain.w2[i][j];
       out[j] = tanh(sum);
     }
-    return out; // [unused, left, right, unused]
+    return out;
   }
 
-  // ---------- Training loop ----------
+  // ---------- Persistent training progress ----------
+  const SAVE_KEY = 'polyai_training_v1';
+  function loadTraining() {
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch (e) { return null; }
+  }
+  function saveTraining(t) {
+    try {
+      localStorage.setItem(SAVE_KEY, JSON.stringify({
+        bestBrain: t.bestBrain, bestReward: t.bestReward, episode: t.episode, mutationScale: t.mutationScale,
+      }));
+    } catch (e) {}
+  }
+
+  const restored = loadTraining();
   const Trainer = {
-    brain: makeBrain(),
-    bestBrain: null,
-    bestReward: -Infinity,
-    mutationScale: 0.4,
-    episode: 0,
+    brain: restored?.bestBrain ? mutate(restored.bestBrain, restored.mutationScale ?? 0.4) : makeBrain(),
+    bestBrain: restored?.bestBrain ?? null,
+    bestReward: restored?.bestReward ?? -Infinity,
+    mutationScale: restored?.mutationScale ?? 0.4,
+    episode: restored?.episode ?? 0,
     episodeReward: 0,
     lastCheckpoint: 0,
     framesSinceProgress: 0,
     running: true,
     carId: null,
     lastPos: null,
+    finishes: restored?.finishes ?? 0,
   };
+  if (restored) {
+    console.log(`[PolyAI] Restored training progress: episode ${Trainer.episode}, best reward ${Trainer.bestReward.toFixed(1)}`);
+  }
 
   function groundedWheelCount(s) {
     return (s.wheelContact || []).filter(c => c !== null).length;
   }
 
-  function resetEpisode(s) {
+  function resetEpisode(s, finished) {
     Trainer.episode++;
-    console.log(`[PolyAI] Episode ${Trainer.episode} ended. Reward: ${Trainer.episodeReward.toFixed(1)} | Best: ${Trainer.bestReward.toFixed(1)} | Noise: ${Trainer.mutationScale.toFixed(3)} | Known checkpoints: ${Object.keys(checkpointPositions).length}`);
+
+    if (finished) {
+      Trainer.finishes = (Trainer.finishes || 0) + 1;
+      console.log(`%c[PolyAI] 🏁 FINISHED! (finish #${Trainer.finishes}) Episode ${Trainer.episode} | Reward: ${Trainer.episodeReward.toFixed(1)}`, 'color: lime; font-weight: bold;');
+    } else {
+      console.log(`[PolyAI] Episode ${Trainer.episode} ended (crashed/stuck). Reward: ${Trainer.episodeReward.toFixed(1)} | Best: ${Trainer.bestReward.toFixed(1)} | Noise: ${Trainer.mutationScale.toFixed(3)}`);
+    }
 
     if (Trainer.episodeReward > Trainer.bestReward) {
       Trainer.bestReward = Trainer.episodeReward;
@@ -140,11 +170,16 @@
       Trainer.brain = cloneBrain(Trainer.bestBrain);
     }
 
+    // Slowly reduce exploration noise over time so it converges instead of jittering forever
+    Trainer.mutationScale = Math.max(0.05, 0.4 * Math.pow(0.999, Trainer.episode));
+
     Trainer.brain = mutate(Trainer.bestBrain || Trainer.brain, Trainer.mutationScale);
     Trainer.episodeReward = 0;
     Trainer.lastCheckpoint = s ? s.nextCheckpointIndex : 0;
     Trainer.framesSinceProgress = 0;
     Trainer.lastPos = null;
+
+    saveTraining(Trainer);
 
     if (Trainer.carId != null && !deadIds.has(Trainer.carId)) sendControl(Trainer.carId, { reset: true });
   }
@@ -220,18 +255,22 @@
     } else {
       Trainer.framesSinceProgress++;
       if (target) Trainer.episodeReward += (1 - Math.abs(checkpointAngle)) * 0.02;
+      if (target && Math.abs(checkpointAngle) < 0.15 && (controls.left || controls.right)) {
+        Trainer.episodeReward -= 0.03;
+      }
     }
     Trainer.episodeReward += (s.speedKmh || 0) * 0.01;
 
     const stuckTooLong = Trainer.framesSinceProgress > 240;
-    if (stuckTooLong || s.finishFrames != null) {
-      if (s.finishFrames != null) Trainer.episodeReward += 500;
+    const finished = s.finishFrames != null;
+    if (stuckTooLong || finished) {
+      if (finished) Trainer.episodeReward += 500;
       deadIds.add(Trainer.carId);
-      resetEpisode(s);
+      resetEpisode(s, finished);
     }
 
     if (tick % 60 === 0) {
-      console.log(`[PolyAI] car ${Trainer.carId} | speed ${Math.round(s.speedKmh)} | ckpt ${s.nextCheckpointIndex} | angle ${checkpointAngle.toFixed(2)} | controls ${JSON.stringify(controls)} | reward ${Trainer.episodeReward.toFixed(1)}`);
+      console.log(`[PolyAI] car ${Trainer.carId} | speed ${Math.round(s.speedKmh)} | ckpt ${s.nextCheckpointIndex} | angle ${checkpointAngle.toFixed(2)} | reward ${Trainer.episodeReward.toFixed(1)} | episode ${Trainer.episode} | finishes ${Trainer.finishes || 0}`);
     }
   }, 16);
 
@@ -242,9 +281,13 @@
     checkpointPositions,
     pause() { Trainer.running = false; },
     resume() { Trainer.running = true; },
+    resetTraining() {
+      localStorage.removeItem(SAVE_KEY);
+      console.log('[PolyAI] Training progress cleared. Reload the page to start fresh.');
+    },
   };
 
-  console.log('[PolyAI] Training loop ready (v5: always accelerate, AI only picks steering).');
+  console.log('[PolyAI] Training loop ready (v6: finish detection + persistent progress across reloads).');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
