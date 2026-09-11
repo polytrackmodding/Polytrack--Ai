@@ -1,7 +1,7 @@
-<<!doctype html><html><head><meta charset="utf-8"><link rel="preload" href="forced_square.woff2" as="font" type="font/woff2" crossorigin="anonymous"/><link rel="preload" href="images/logo.svg" as="image" type="image/svg+xml"/><link rel="preload" href="images/discord.svg" as="image" type="image/svg+xml"/><link rel="manifest" href="manifest.json"/><meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
+<!doctype html><html><head><meta charset="utf-8"><link rel="preload" href="forced_square.woff2" as="font" type="font/woff2" crossorigin="anonymous"/><link rel="preload" href="images/logo.svg" as="image" type="image/svg+xml"/><link rel="preload" href="images/discord.svg" as="image" type="image/svg+xml"/><link rel="manifest" href="manifest.json"/><meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <script>
 (function () {
-  // ---------- Low-level capture (unchanged from the working version) ----------
+  // ---------- Low-level capture ----------
   const state = {};
   const deadIds = new Set();
   const workerRefs = [];
@@ -89,7 +89,7 @@
       for (let i = 0; i < 8; i++) sum += h[i] * brain.w2[i][j];
       out[j] = sum;
     }
-    return out; // 3 raw scores: [straight, left, right]
+    return out; // [straight, left, right]
   }
 
   // ---------- Training loop ----------
@@ -122,13 +122,12 @@
       Trainer.brain = cloneBrain(Trainer.bestBrain);
     }
 
-    // Try a new random tweak off the best brain for the next attempt
     Trainer.brain = mutate(Trainer.bestBrain || Trainer.brain, Trainer.mutationScale);
     Trainer.episodeReward = 0;
     Trainer.lastCheckpoint = s ? s.nextCheckpointIndex : 0;
     Trainer.framesSinceProgress = 0;
 
-    if (Trainer.carId != null) sendControl(Trainer.carId, { reset: true });
+    if (Trainer.carId != null && !deadIds.has(Trainer.carId)) sendControl(Trainer.carId, { reset: true });
   }
 
   let tick = 0;
@@ -136,12 +135,17 @@
     tick++;
     const ids = getCarIds();
     if (!ids.length) return;
-    if (Trainer.carId == null || !ids.includes(Trainer.carId)) Trainer.carId = ids[0];
+
+    const newestId = Math.max(...ids);
+    if (Trainer.carId !== newestId) {
+      Trainer.carId = newestId;
+      Trainer.lastCheckpoint = 0;
+      Trainer.framesSinceProgress = 0;
+    }
 
     const s = state[Trainer.carId];
     if (!s) return;
 
-    // --- Build the observation the brain sees ---
     const grounded = groundedWheelCount(s);
     const input = [
       Math.min(s.speedKmh, 300) / 300,
@@ -151,7 +155,6 @@
       Math.min(Trainer.framesSinceProgress, 300) / 300,
     ];
 
-    // --- Decide action ---
     const out = forward(Trainer.brain, input);
     let action = 0, best = out[0];
     for (let i = 1; i < 3; i++) if (out[i] > best) { best = out[i]; action = i; }
@@ -160,7 +163,6 @@
     if (action === 2) controls.right = true;
     sendControl(Trainer.carId, controls);
 
-    // --- Reward bookkeeping ---
     if (s.nextCheckpointIndex > Trainer.lastCheckpoint) {
       Trainer.episodeReward += 100;
       Trainer.lastCheckpoint = s.nextCheckpointIndex;
@@ -170,10 +172,10 @@
     }
     Trainer.episodeReward += (s.speedKmh || 0) * 0.01;
 
-    // --- Crash / stuck detection -> reset episode ---
-    const stuckTooLong = Trainer.framesSinceProgress > 240; // ~4 sec of no checkpoint progress
-    const airborneTooLong = grounded === 0;
-    if (stuckTooLong) {
+    const stuckTooLong = Trainer.framesSinceProgress > 240;
+    if (stuckTooLong || s.finishFrames != null) {
+      if (s.finishFrames != null) Trainer.episodeReward += 500;
+      deadIds.add(Trainer.carId);
       resetEpisode(s);
     }
 
@@ -190,7 +192,7 @@
     resume() { Trainer.running = true; },
   };
 
-  console.log('[PolyAI] Training loop ready (v1: reactive, no track sensors yet). It will drive, crash, reset, and slowly improve on its own.');
+  console.log('[PolyAI] Training loop ready (v2: tracks newest car, handles finish line).');
 })();
 </script>
-<script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>>
+<script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
