@@ -53,7 +53,7 @@
     for (const w of workerRefs) w.postMessage(msg);
   }
 
-  // ---------- Checkpoint memory: learn where checkpoints are from experience ----------
+  // ---------- Checkpoint memory ----------
   let checkpointPositions = {};
   try {
     const saved = localStorage.getItem('polyai_checkpoints');
@@ -70,8 +70,11 @@
     }
   }
 
-  // ---------- Tiny neural network: 7 inputs -> 8 hidden (tanh) -> 3 outputs ----------
+  // ---------- Tiny neural network: 7 inputs -> 8 hidden (tanh) -> 4 independent outputs ----------
+  // Outputs are now: [up, left, right, down] - each decided independently, so any
+  // combination (e.g. up+left, or up+down braking-while-turning) is possible.
   const N_INPUTS = 7;
+  const N_OUTPUTS = 4;
   function randWeights(rows, cols) {
     const w = [];
     for (let i = 0; i < rows; i++) {
@@ -82,7 +85,7 @@
     return w;
   }
   function makeBrain() {
-    return { w1: randWeights(N_INPUTS, 8), b1: new Array(8).fill(0), w2: randWeights(8, 3), b2: new Array(3).fill(0) };
+    return { w1: randWeights(N_INPUTS, 8), b1: new Array(8).fill(0), w2: randWeights(8, N_OUTPUTS), b2: new Array(N_OUTPUTS).fill(0) };
   }
   function cloneBrain(b) { return JSON.parse(JSON.stringify(b)); }
   function mutate(b, scale) {
@@ -99,13 +102,13 @@
       for (let i = 0; i < N_INPUTS; i++) sum += input[i] * brain.w1[i][j];
       h[j] = tanh(sum);
     }
-    const out = new Array(3).fill(0);
-    for (let j = 0; j < 3; j++) {
+    const out = new Array(N_OUTPUTS).fill(0);
+    for (let j = 0; j < N_OUTPUTS; j++) {
       let sum = brain.b2[j];
       for (let i = 0; i < 8; i++) sum += h[i] * brain.w2[i][j];
-      out[j] = sum;
+      out[j] = tanh(sum); // each output independently squashed to -1..1
     }
-    return out; // [straight, left, right]
+    return out; // [up, left, right, down], each: press if > 0
   }
 
   // ---------- Training loop ----------
@@ -165,12 +168,10 @@
     const s = state[Trainer.carId];
     if (!s) return;
 
-    // Record checkpoint position whenever we pass a new one
     if (s.nextCheckpointIndex > Trainer.lastCheckpoint) {
       recordCheckpointIfNew(Trainer.lastCheckpoint, s.position);
     }
 
-    // Figure out which way we're currently moving (proxy for heading)
     let moveDir = { x: 0, z: 1 };
     if (Trainer.lastPos) {
       const dx = s.position.x - Trainer.lastPos.x;
@@ -180,7 +181,6 @@
     }
     Trainer.lastPos = { x: s.position.x, y: s.position.y, z: s.position.z };
 
-    // Direction/distance to next known checkpoint
     let checkpointAngle = 0, checkpointDist = 1;
     const target = checkpointPositions[s.nextCheckpointIndex];
     if (target) {
@@ -192,7 +192,7 @@
         const tdx = tx / tmag, tdz = tz / tmag;
         const cross = moveDir.x * tdz - moveDir.z * tdx;
         const dot = moveDir.x * tdx + moveDir.z * tdz;
-        checkpointAngle = Math.atan2(cross, dot) / Math.PI; // -1..1
+        checkpointAngle = Math.atan2(cross, dot) / Math.PI;
       }
     }
 
@@ -208,11 +208,12 @@
     ];
 
     const out = forward(Trainer.brain, input);
-    let action = 0, best = out[0];
-    for (let i = 1; i < 3; i++) if (out[i] > best) { best = out[i]; action = i; }
-    const controls = { up: true };
-    if (action === 1) controls.left = true;
-    if (action === 2) controls.right = true;
+    const controls = {
+      up: out[0] > 0,
+      left: out[1] > 0,
+      right: out[2] > 0,
+      down: out[3] > 0,
+    };
     sendControl(Trainer.carId, controls);
 
     if (s.nextCheckpointIndex > Trainer.lastCheckpoint) {
@@ -221,7 +222,6 @@
       Trainer.framesSinceProgress = 0;
     } else {
       Trainer.framesSinceProgress++;
-      // small reward for pointing toward the checkpoint, if we know where it is
       if (target) Trainer.episodeReward += (1 - Math.abs(checkpointAngle)) * 0.02;
     }
     Trainer.episodeReward += (s.speedKmh || 0) * 0.01;
@@ -234,7 +234,7 @@
     }
 
     if (tick % 60 === 0) {
-      console.log(`[PolyAI] car ${Trainer.carId} | speed ${Math.round(s.speedKmh)} | ckpt ${s.nextCheckpointIndex} | angle ${checkpointAngle.toFixed(2)} | reward ${Trainer.episodeReward.toFixed(1)} | stuck ${Trainer.framesSinceProgress}`);
+      console.log(`[PolyAI] car ${Trainer.carId} | speed ${Math.round(s.speedKmh)} | ckpt ${s.nextCheckpointIndex} | angle ${checkpointAngle.toFixed(2)} | controls ${JSON.stringify(controls)} | reward ${Trainer.episodeReward.toFixed(1)}`);
     }
   }, 16);
 
@@ -247,7 +247,7 @@
     resume() { Trainer.running = true; },
   };
 
-  console.log('[PolyAI] Training loop ready (v3: checkpoint-aware). Drive one manual lap first if this is a new track, so it can learn checkpoint locations!');
+  console.log('[PolyAI] Training loop ready (v4: independent multi-input controls). Drive one manual lap first if checkpoints aren\'t learned yet.');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
