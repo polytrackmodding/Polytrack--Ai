@@ -1,9 +1,9 @@
 <<!doctype html><html><head><meta charset="utf-8"><link rel="preload" href="forced_square.woff2" as="font" type="font/woff2" crossorigin="anonymous"/><link rel="preload" href="images/logo.svg" as="image" type="image/svg+xml"/><link rel="preload" href="images/discord.svg" as="image" type="image/svg+xml"/><link rel="manifest" href="manifest.json"/><meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <script>
 (function () {
+  // ---------- Low-level capture (unchanged from the working version) ----------
   const state = {};
   const deadIds = new Set();
-  const startedIds = new Set();
   const workerRefs = [];
 
   const OriginalWorker = window.Worker;
@@ -46,37 +46,151 @@
     return OriginalMapSet.call(this, key, value);
   };
 
-  window.PolyAI = {
-    getState(carId) {
-      if (carId !== undefined) return state[carId];
-      const ids = Object.keys(state);
-      return ids.length ? state[ids[0]] : null;
-    },
-    getCarIds() { return Object.keys(state).map(Number).filter(id => !deadIds.has(id)); },
-    getWorkerCount() { return workerRefs.length; },
-    control(carId, { up = false, right = false, down = false, left = false, reset = false } = {}) {
-      if (!workerRefs.length || deadIds.has(carId)) return;
-      const msg = { messageType: 6, carId, up, right, down, left, reset };
-      for (const w of workerRefs) w.postMessage(msg);
-    },
-    autoDriveEnabled: true
+  function getCarIds() { return Object.keys(state).map(Number).filter(id => !deadIds.has(id)); }
+  function sendControl(carId, { up = false, right = false, down = false, left = false, reset = false } = {}) {
+    if (!workerRefs.length || deadIds.has(carId)) return;
+    const msg = { messageType: 6, carId, up, right, down, left, reset };
+    for (const w of workerRefs) w.postMessage(msg);
+  }
+
+  // ---------- Tiny neural network: 5 inputs -> 8 hidden (tanh) -> 3 outputs ----------
+  function randWeights(rows, cols) {
+    const w = [];
+    for (let i = 0; i < rows; i++) {
+      const row = [];
+      for (let j = 0; j < cols; j++) row.push((Math.random() * 2 - 1) * 0.5);
+      w.push(row);
+    }
+    return w;
+  }
+  function makeBrain() {
+    return { w1: randWeights(5, 8), b1: new Array(8).fill(0), w2: randWeights(8, 3), b2: new Array(3).fill(0) };
+  }
+  function cloneBrain(b) {
+    return JSON.parse(JSON.stringify(b));
+  }
+  function mutate(b, scale) {
+    const nb = cloneBrain(b);
+    for (const mat of [nb.w1, nb.w2]) for (const row of mat) for (let j = 0; j < row.length; j++) row[j] += (Math.random() * 2 - 1) * scale;
+    for (const arr of [nb.b1, nb.b2]) for (let j = 0; j < arr.length; j++) arr[j] += (Math.random() * 2 - 1) * scale;
+    return nb;
+  }
+  function tanh(x) { return Math.tanh(x); }
+  function forward(brain, input) {
+    const h = new Array(8).fill(0);
+    for (let j = 0; j < 8; j++) {
+      let sum = brain.b1[j];
+      for (let i = 0; i < 5; i++) sum += input[i] * brain.w1[i][j];
+      h[j] = tanh(sum);
+    }
+    const out = new Array(3).fill(0);
+    for (let j = 0; j < 3; j++) {
+      let sum = brain.b2[j];
+      for (let i = 0; i < 8; i++) sum += h[i] * brain.w2[i][j];
+      out[j] = sum;
+    }
+    return out; // 3 raw scores: [straight, left, right]
+  }
+
+  // ---------- Training loop ----------
+  const Trainer = {
+    brain: makeBrain(),
+    bestBrain: null,
+    bestReward: -Infinity,
+    mutationScale: 0.4,
+    episode: 0,
+    episodeReward: 0,
+    lastCheckpoint: 0,
+    framesSinceProgress: 0,
+    running: true,
+    carId: null,
   };
+
+  function groundedWheelCount(s) {
+    return (s.wheelContact || []).filter(c => c !== null).length;
+  }
+
+  function resetEpisode(s) {
+    Trainer.episode++;
+    console.log(`[PolyAI] Episode ${Trainer.episode} ended. Reward: ${Trainer.episodeReward.toFixed(1)} | Best: ${Trainer.bestReward.toFixed(1)} | Noise: ${Trainer.mutationScale.toFixed(3)}`);
+
+    if (Trainer.episodeReward > Trainer.bestReward) {
+      Trainer.bestReward = Trainer.episodeReward;
+      Trainer.bestBrain = cloneBrain(Trainer.brain);
+      console.log('[PolyAI] New best brain! Reward:', Trainer.bestReward.toFixed(1));
+    } else if (Trainer.bestBrain) {
+      Trainer.brain = cloneBrain(Trainer.bestBrain);
+    }
+
+    // Try a new random tweak off the best brain for the next attempt
+    Trainer.brain = mutate(Trainer.bestBrain || Trainer.brain, Trainer.mutationScale);
+    Trainer.episodeReward = 0;
+    Trainer.lastCheckpoint = s ? s.nextCheckpointIndex : 0;
+    Trainer.framesSinceProgress = 0;
+
+    if (Trainer.carId != null) sendControl(Trainer.carId, { reset: true });
+  }
 
   let tick = 0;
   setInterval(() => {
     tick++;
-    const ids = window.PolyAI.getCarIds();
-    for (const id of ids) {
-      if (window.PolyAI.autoDriveEnabled) window.PolyAI.control(id, { up: true });
+    const ids = getCarIds();
+    if (!ids.length) return;
+    if (Trainer.carId == null || !ids.includes(Trainer.carId)) Trainer.carId = ids[0];
+
+    const s = state[Trainer.carId];
+    if (!s) return;
+
+    // --- Build the observation the brain sees ---
+    const grounded = groundedWheelCount(s);
+    const input = [
+      Math.min(s.speedKmh, 300) / 300,
+      s.steering || 0,
+      grounded / 4,
+      (s.collisionImpulses && s.collisionImpulses.length) ? 1 : 0,
+      Math.min(Trainer.framesSinceProgress, 300) / 300,
+    ];
+
+    // --- Decide action ---
+    const out = forward(Trainer.brain, input);
+    let action = 0, best = out[0];
+    for (let i = 1; i < 3; i++) if (out[i] > best) { best = out[i]; action = i; }
+    const controls = { up: true };
+    if (action === 1) controls.left = true;
+    if (action === 2) controls.right = true;
+    sendControl(Trainer.carId, controls);
+
+    // --- Reward bookkeeping ---
+    if (s.nextCheckpointIndex > Trainer.lastCheckpoint) {
+      Trainer.episodeReward += 100;
+      Trainer.lastCheckpoint = s.nextCheckpointIndex;
+      Trainer.framesSinceProgress = 0;
+    } else {
+      Trainer.framesSinceProgress++;
     }
-    if (tick % 60 === 0 && ids.length) {
-      console.log('[PolyAI] status:', JSON.stringify(ids.map(id => ({
-        id, frames: state[id]?.frames, speedKmh: Math.round((state[id]?.speedKmh || 0) * 10) / 10
-      }))));
+    Trainer.episodeReward += (s.speedKmh || 0) * 0.01;
+
+    // --- Crash / stuck detection -> reset episode ---
+    const stuckTooLong = Trainer.framesSinceProgress > 240; // ~4 sec of no checkpoint progress
+    const airborneTooLong = grounded === 0;
+    if (stuckTooLong) {
+      resetEpisode(s);
+    }
+
+    if (tick % 60 === 0) {
+      console.log(`[PolyAI] car ${Trainer.carId} | speed ${Math.round(s.speedKmh)} | ckpt ${s.nextCheckpointIndex} | reward so far ${Trainer.episodeReward.toFixed(1)} | stuckFrames ${Trainer.framesSinceProgress}`);
     }
   }, 16);
 
-  console.log('[PolyAI] ready (v5, no repeated StartCar).');
+  window.PolyAI = {
+    getState(carId) { return carId !== undefined ? state[carId] : state[Trainer.carId]; },
+    getCarIds,
+    Trainer,
+    pause() { Trainer.running = false; },
+    resume() { Trainer.running = true; },
+  };
+
+  console.log('[PolyAI] Training loop ready (v1: reactive, no track sensors yet). It will drive, crash, reset, and slowly improve on its own.');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>>
