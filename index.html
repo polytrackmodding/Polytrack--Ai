@@ -70,9 +70,7 @@
     }
   }
 
-  // ---------- Tiny neural network: 7 inputs -> 8 hidden (tanh) -> 4 independent outputs ----------
-  // Outputs are now: [up, left, right, down] - each decided independently, so any
-  // combination (e.g. up+left, or up+down braking-while-turning) is possible.
+  // ---------- Tiny neural network: 7 inputs -> 8 hidden (tanh) -> 4 outputs (only left/right used) ----------
   const N_INPUTS = 7;
   const N_OUTPUTS = 4;
   function randWeights(rows, cols) {
@@ -106,9 +104,9 @@
     for (let j = 0; j < N_OUTPUTS; j++) {
       let sum = brain.b2[j];
       for (let i = 0; i < 8; i++) sum += h[i] * brain.w2[i][j];
-      out[j] = tanh(sum); // each output independently squashed to -1..1
+      out[j] = tanh(sum);
     }
-    return out; // [up, left, right, down], each: press if > 0
+    return out; // [unused, left, right, unused]
   }
 
   // ---------- Training loop ----------
@@ -209,10 +207,9 @@
 
     const out = forward(Trainer.brain, input);
     const controls = {
-      up: out[0] > 0,
+      up: true,
       left: out[1] > 0,
       right: out[2] > 0,
-      down: out[3] > 0,
     };
     sendControl(Trainer.carId, controls);
 
@@ -247,7 +244,7 @@
     resume() { Trainer.running = true; },
   };
 
-  console.log('[PolyAI] Training loop ready (v4: independent multi-input controls). Drive one manual lap first if checkpoints aren\'t learned yet.');
+  console.log('[PolyAI] Training loop ready (v5: always accelerate, AI only picks steering).');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
