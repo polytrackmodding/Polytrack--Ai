@@ -1,10 +1,11 @@
 <!doctype html><html><head><meta charset="utf-8"><link rel="preload" href="forced_square.woff2" as="font" type="font/woff2" crossorigin="anonymous"/><link rel="preload" href="images/logo.svg" as="image" type="image/svg+xml"/><link rel="preload" href="images/discord.svg" as="image" type="image/svg+xml"/><link rel="manifest" href="manifest.json"/><meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <script>
 (function () {
-  // ---------- Low-level capture ----------
   const state = {};
   const deadIds = new Set();
+  const startedIds = new Set();
   const workerRefs = [];
+  let capturedTrackData = null;
 
   const OriginalWorker = window.Worker;
   window.Worker = function (...args) {
@@ -12,6 +13,21 @@
     try {
       if (args[0] && String(args[0]).includes('simulation_worker')) {
         workerRefs.push(w);
+
+        const originalPostMessage = w.postMessage.bind(w);
+        w.postMessage = function (msg, ...rest) {
+          if (msg && msg.messageType === 3 && !capturedTrackData) {
+            capturedTrackData = {
+              mountainVertices: msg.mountainVertices,
+              mountainOffset: msg.mountainOffset,
+              trackData: msg.trackData,
+            };
+            try { localStorage.setItem('polyai_captured_track', JSON.stringify(capturedTrackData)); } catch (e) {}
+            console.log('%c[PolyAI] Captured real track data! Run PolyAI.downloadTrackData()', 'color: cyan; font-weight: bold;');
+          }
+          return originalPostMessage(msg, ...rest);
+        };
+
         w.addEventListener('error', (e) => {
           console.warn('[PolyAI] worker error, clearing tracked cars:', e.message);
           for (const id of Object.keys(state)) deadIds.add(Number(id));
@@ -34,8 +50,14 @@
         try {
           const arg = args[0];
           if (arg && typeof arg === 'object' && 'speedKmh' in arg && 'position' in arg) {
+            const isNew = !(key in state);
             state[key] = arg;
             deadIds.delete(key);
+            if (isNew && !startedIds.has(key)) {
+              startedIds.add(key);
+              for (const w of workerRefs) w.postMessage({ messageType: 5, carId: key, targetSimulationTimeFrames: null });
+              console.log('[PolyAI] auto-started car', key);
+            }
           }
         } catch (e) {}
         return value.apply(this, args);
@@ -53,7 +75,6 @@
     for (const w of workerRefs) w.postMessage(msg);
   }
 
-  // ---------- Checkpoint memory ----------
   let checkpointPositions = {};
   try {
     const saved = localStorage.getItem('polyai_checkpoints');
@@ -70,7 +91,6 @@
     }
   }
 
-  // ---------- Tiny neural network: 7 inputs -> 8 hidden (tanh) -> 4 outputs (only left/right used) ----------
   const N_INPUTS = 7;
   const N_OUTPUTS = 4;
   function randWeights(rows, cols) {
@@ -85,7 +105,7 @@
   function makeBrain() {
     const w1 = randWeights(N_INPUTS, 8);
     const w2 = randWeights(8, N_OUTPUTS);
-    for (let i = 0; i < 8; i++) w2[i][2] = -w2[i][1]; // start left/right unbiased
+    for (let i = 0; i < 8; i++) w2[i][2] = -w2[i][1];
     return { w1, b1: new Array(8).fill(0), w2, b2: new Array(N_OUTPUTS).fill(0) };
   }
   function cloneBrain(b) { return JSON.parse(JSON.stringify(b)); }
@@ -112,7 +132,6 @@
     return out;
   }
 
-  // ---------- Persistent training progress ----------
   const SAVE_KEY = 'polyai_training_v1';
   function loadTraining() {
     try {
@@ -124,7 +143,7 @@
   function saveTraining(t) {
     try {
       localStorage.setItem(SAVE_KEY, JSON.stringify({
-        bestBrain: t.bestBrain, bestReward: t.bestReward, episode: t.episode, mutationScale: t.mutationScale,
+        bestBrain: t.bestBrain, bestReward: t.bestReward, episode: t.episode, mutationScale: t.mutationScale, finishes: t.finishes,
       }));
     } catch (e) {}
   }
@@ -170,9 +189,7 @@
       Trainer.brain = cloneBrain(Trainer.bestBrain);
     }
 
-    // Slowly reduce exploration noise over time so it converges instead of jittering forever
     Trainer.mutationScale = Math.max(0.05, 0.4 * Math.pow(0.999, Trainer.episode));
-
     Trainer.brain = mutate(Trainer.bestBrain || Trainer.brain, Trainer.mutationScale);
     Trainer.episodeReward = 0;
     Trainer.lastCheckpoint = s ? s.nextCheckpointIndex : 0;
@@ -180,7 +197,6 @@
     Trainer.lastPos = null;
 
     saveTraining(Trainer);
-
     if (Trainer.carId != null && !deadIds.has(Trainer.carId)) sendControl(Trainer.carId, { reset: true });
   }
 
@@ -241,11 +257,7 @@
     ];
 
     const out = forward(Trainer.brain, input);
-    const controls = {
-      up: true,
-      left: out[1] > 0,
-      right: out[2] > 0,
-    };
+    const controls = { up: true, left: out[1] > 0, right: out[2] > 0 };
     sendControl(Trainer.carId, controls);
 
     if (s.nextCheckpointIndex > Trainer.lastCheckpoint) {
@@ -279,6 +291,22 @@
     getCarIds,
     Trainer,
     checkpointPositions,
+    getTrackData() {
+      if (capturedTrackData) return capturedTrackData;
+      try {
+        const saved = localStorage.getItem('polyai_captured_track');
+        if (saved) return JSON.parse(saved);
+      } catch (e) {}
+      return null;
+    },
+    downloadTrackData() {
+      const data = this.getTrackData();
+      if (!data) { console.warn('[PolyAI] No track data captured yet.'); return; }
+      const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'track_data.json'; a.click();
+    },
     pause() { Trainer.running = false; },
     resume() { Trainer.running = true; },
     resetTraining() {
@@ -287,7 +315,7 @@
     },
   };
 
-  console.log('[PolyAI] Training loop ready (v6: finish detection + persistent progress across reloads).');
+  console.log('[PolyAI] Ready (v6 + track-data capture).');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
