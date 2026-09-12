@@ -6,6 +6,7 @@
   const startedIds = new Set();
   const workerRefs = [];
   let capturedTrackData = null;
+  let capturedTrackParts = null;
 
   const OriginalWorker = window.Worker;
   window.Worker = function (...args) {
@@ -16,6 +17,11 @@
 
         const originalPostMessage = w.postMessage.bind(w);
         w.postMessage = function (msg, ...rest) {
+          if (msg && msg.messageType === 0 && !capturedTrackParts) {
+            capturedTrackParts = msg.trackParts;
+            try { localStorage.setItem('polyai_captured_trackparts', JSON.stringify(capturedTrackParts)); } catch (e) {}
+            console.log('%c[PolyAI] Captured trackParts! count:', 'color: orange; font-weight: bold;', Array.isArray(capturedTrackParts) ? capturedTrackParts.length : typeof capturedTrackParts);
+          }
           if (msg && msg.messageType === 3 && !capturedTrackData) {
             capturedTrackData = {
               mountainVertices: msg.mountainVertices,
@@ -299,6 +305,14 @@
       } catch (e) {}
       return null;
     },
+    getTrackParts() {
+      if (capturedTrackParts) return capturedTrackParts;
+      try {
+        const saved = localStorage.getItem('polyai_captured_trackparts');
+        if (saved) return JSON.parse(saved);
+      } catch (e) {}
+      return null;
+    },
     downloadTrackData() {
       const data = this.getTrackData();
       if (!data) { console.warn('[PolyAI] No track data captured yet.'); return; }
@@ -306,6 +320,14 @@
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = 'track_data.json'; a.click();
+    },
+    downloadTrackParts() {
+      const data = this.getTrackParts();
+      if (!data) { console.warn('[PolyAI] No trackParts captured yet.'); return; }
+      const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'track_parts.json'; a.click();
     },
     pause() { Trainer.running = false; },
     resume() { Trainer.running = true; },
@@ -315,7 +337,7 @@
     },
   };
 
-  console.log('[PolyAI] Ready (v6 + track-data capture).');
+  console.log('[PolyAI] Ready (v9: also captures trackParts from Init message).');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
