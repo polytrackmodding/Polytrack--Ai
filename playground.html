@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>PolyAI Playground</title></head>
+<body style="font-family: monospace; background: #111; color: #0f0; padding: 20px;">
+<h2>PolyAI Playground — physics only, no game UI</h2>
+<div id="log"></div>
+<script>
+  const logDiv = document.getElementById('log');
+  function log(...args) {
+    console.log(...args);
+    const line = document.createElement('div');
+    line.textContent = args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ');
+    logDiv.prepend(line);
+  }
+
+  log('Creating simulation worker directly (no game loaded at all)...');
+  const worker = new Worker('simulation_worker.bundle.js');
+
+  worker.onerror = (e) => log('WORKER ERROR:', e.message);
+
+  worker.onmessage = (e) => {
+    const data = e.data;
+    if (data.messageType === 10 && data.carStateBuffers) {
+      log('Received UpdateResult with', data.carStateBuffers.length, 'car buffer(s)');
+    } else {
+      log('WORKER SAYS (type ' + data.messageType + '):', JSON.stringify(data).slice(0, 150));
+    }
+  };
+
+  Promise.all([
+    fetch('track_data.json').then(r => r.json()),
+    fetch('track_parts.json').then(r => r.json()),
+  ]).then(([trackData, trackParts]) => {
+    log('Loaded track files, sending Init...');
+    worker.postMessage({
+      messageType: 0, version: '0.6.2', isRealtime: false,
+      trackParts: trackParts, carCollisionShapeVertices: [], carMassOffset: { x: 0, y: 0, z: 0 },
+    });
+
+    log('Sending CreateCar...');
+    worker.postMessage({
+      messageType: 3,
+      mountainVertices: trackData.mountainVertices,
+      mountainOffset: trackData.mountainOffset,
+      trackData: trackData.trackData,
+      carId: 0,
+      carRecording: null,
+    });
+
+    log('Sending StartCar...');
+    worker.postMessage({ messageType: 5, carId: 0, targetSimulationTimeFrames: null });
+
+    log('Starting control loop (up:true, forever)...');
+    setInterval(() => {
+      worker.postMessage({ messageType: 6, carId: 0, up: true, right: false, down: false, left: false, reset: false });
+    }, 16);
+  }).catch((err) => log('FAILED to load track files:', err.message));
+</script>
+</body>
+</html>
