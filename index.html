@@ -3,10 +3,9 @@
 (function () {
   const state = {};
   const deadIds = new Set();
-  const startedIds = new Set();
   const workerRefs = [];
-  let capturedTrackData = null;
-  let capturedTrackParts = null;
+  let checkpointPositions = {};
+  window.__lastCkpt = 0;
 
   const OriginalWorker = window.Worker;
   window.Worker = function (...args) {
@@ -14,40 +13,15 @@
     try {
       if (args[0] && String(args[0]).includes('simulation_worker')) {
         workerRefs.push(w);
-
-        const originalPostMessage = w.postMessage.bind(w);
-        w.postMessage = function (msg, ...rest) {
-          if (msg && msg.messageType === 0 && !capturedTrackParts) {
-            capturedTrackParts = msg.trackParts;
-            try { localStorage.setItem('polyai_captured_trackparts', JSON.stringify(capturedTrackParts)); } catch (e) {}
-            console.log('%c[PolyAI] Captured trackParts! count:', 'color: orange; font-weight: bold;', Array.isArray(capturedTrackParts) ? capturedTrackParts.length : typeof capturedTrackParts);
-          }
-          if (msg && msg.messageType === 3 && !capturedTrackData) {
-            capturedTrackData = {
-              mountainVertices: msg.mountainVertices,
-              mountainOffset: msg.mountainOffset,
-              trackData: msg.trackData,
-            };
-            try { localStorage.setItem('polyai_captured_track', JSON.stringify(capturedTrackData)); } catch (e) {}
-            console.log('%c[PolyAI] Captured real track data! Run PolyAI.downloadTrackData()', 'color: cyan; font-weight: bold;');
-          }
-          return originalPostMessage(msg, ...rest);
-        };
-
-        w.addEventListener('error', (e) => {
-          console.warn('[PolyAI] worker error, clearing tracked cars:', e.message);
-          for (const id of Object.keys(state)) deadIds.add(Number(id));
-        });
-        console.log('[PolyAI] captured simulation worker #' + workerRefs.length);
+        w.addEventListener('error', (e) => { for (const id of Object.keys(state)) deadIds.add(Number(id)); });
+        console.log('[PolyAI] captured simulation worker');
       }
     } catch (e) {}
     return w;
   };
   window.Worker.prototype = OriginalWorker.prototype;
 
-  function isSmallInt(k) {
-    return typeof k === 'number' && Number.isInteger(k) && k >= 0 && k < 100000;
-  }
+  function isSmallInt(k) { return typeof k === 'number' && Number.isInteger(k) && k >= 0 && k < 100000; }
 
   const OriginalMapSet = Map.prototype.set;
   Map.prototype.set = function (key, value) {
@@ -56,13 +30,15 @@
         try {
           const arg = args[0];
           if (arg && typeof arg === 'object' && 'speedKmh' in arg && 'position' in arg) {
-            const isNew = !(key in state);
             state[key] = arg;
             deadIds.delete(key);
-            if (isNew && !startedIds.has(key)) {
-              startedIds.add(key);
-              for (const w of workerRefs) w.postMessage({ messageType: 5, carId: key, targetSimulationTimeFrames: null });
-              console.log('[PolyAI] auto-started car', key);
+            if (arg.nextCheckpointIndex > window.__lastCkpt || checkpointPositions[0] == null) {
+              const idx = arg.nextCheckpointIndex - 1 >= 0 ? arg.nextCheckpointIndex - 1 : 0;
+              if (checkpointPositions[idx] == null) {
+                checkpointPositions[idx] = { x: arg.position.x, z: arg.position.z };
+                console.log(`%c[PolyAI] Recorded checkpoint ${idx}: x=${arg.position.x.toFixed(1)}, z=${arg.position.z.toFixed(1)}`, 'color: lime');
+              }
+              window.__lastCkpt = arg.nextCheckpointIndex;
             }
           }
         } catch (e) {}
@@ -74,270 +50,19 @@
     return OriginalMapSet.call(this, key, value);
   };
 
-  function getCarIds() { return Object.keys(state).map(Number).filter(id => !deadIds.has(id)); }
-  function sendControl(carId, { up = false, right = false, down = false, left = false, reset = false } = {}) {
-    if (!workerRefs.length || deadIds.has(carId)) return;
-    const msg = { messageType: 6, carId, up, right, down, left, reset };
-    for (const w of workerRefs) w.postMessage(msg);
-  }
-
-  let checkpointPositions = {};
-  try {
-    const saved = localStorage.getItem('polyai_checkpoints');
-    if (saved) checkpointPositions = JSON.parse(saved);
-  } catch (e) {}
-  function saveCheckpoints() {
-    try { localStorage.setItem('polyai_checkpoints', JSON.stringify(checkpointPositions)); } catch (e) {}
-  }
-  function recordCheckpointIfNew(index, pos) {
-    if (checkpointPositions[index] == null) {
-      checkpointPositions[index] = { x: pos.x, y: pos.y, z: pos.z };
-      saveCheckpoints();
-      console.log(`[PolyAI] Learned position of checkpoint ${index}:`, checkpointPositions[index]);
-    }
-  }
-
-  const N_INPUTS = 7;
-  const N_OUTPUTS = 4;
-  function randWeights(rows, cols) {
-    const w = [];
-    for (let i = 0; i < rows; i++) {
-      const row = [];
-      for (let j = 0; j < cols; j++) row.push((Math.random() * 2 - 1) * 0.5);
-      w.push(row);
-    }
-    return w;
-  }
-  function makeBrain() {
-    const w1 = randWeights(N_INPUTS, 8);
-    const w2 = randWeights(8, N_OUTPUTS);
-    for (let i = 0; i < 8; i++) w2[i][2] = -w2[i][1];
-    return { w1, b1: new Array(8).fill(0), w2, b2: new Array(N_OUTPUTS).fill(0) };
-  }
-  function cloneBrain(b) { return JSON.parse(JSON.stringify(b)); }
-  function mutate(b, scale) {
-    const nb = cloneBrain(b);
-    for (const mat of [nb.w1, nb.w2]) for (const row of mat) for (let j = 0; j < row.length; j++) row[j] += (Math.random() * 2 - 1) * scale;
-    for (const arr of [nb.b1, nb.b2]) for (let j = 0; j < arr.length; j++) arr[j] += (Math.random() * 2 - 1) * scale;
-    return nb;
-  }
-  function tanh(x) { return Math.tanh(x); }
-  function forward(brain, input) {
-    const h = new Array(8).fill(0);
-    for (let j = 0; j < 8; j++) {
-      let sum = brain.b1[j];
-      for (let i = 0; i < N_INPUTS; i++) sum += input[i] * brain.w1[i][j];
-      h[j] = tanh(sum);
-    }
-    const out = new Array(N_OUTPUTS).fill(0);
-    for (let j = 0; j < N_OUTPUTS; j++) {
-      let sum = brain.b2[j];
-      for (let i = 0; i < 8; i++) sum += h[i] * brain.w2[i][j];
-      out[j] = tanh(sum);
-    }
-    return out;
-  }
-
-  const SAVE_KEY = 'polyai_training_v1';
-  function loadTraining() {
-    try {
-      const raw = localStorage.getItem(SAVE_KEY);
-      if (!raw) return null;
-      return JSON.parse(raw);
-    } catch (e) { return null; }
-  }
-  function saveTraining(t) {
-    try {
-      localStorage.setItem(SAVE_KEY, JSON.stringify({
-        bestBrain: t.bestBrain, bestReward: t.bestReward, episode: t.episode, mutationScale: t.mutationScale, finishes: t.finishes,
-      }));
-    } catch (e) {}
-  }
-
-  const restored = loadTraining();
-  const Trainer = {
-    brain: restored?.bestBrain ? mutate(restored.bestBrain, restored.mutationScale ?? 0.4) : makeBrain(),
-    bestBrain: restored?.bestBrain ?? null,
-    bestReward: restored?.bestReward ?? -Infinity,
-    mutationScale: restored?.mutationScale ?? 0.4,
-    episode: restored?.episode ?? 0,
-    episodeReward: 0,
-    lastCheckpoint: 0,
-    framesSinceProgress: 0,
-    running: true,
-    carId: null,
-    lastPos: null,
-    finishes: restored?.finishes ?? 0,
-  };
-  if (restored) {
-    console.log(`[PolyAI] Restored training progress: episode ${Trainer.episode}, best reward ${Trainer.bestReward.toFixed(1)}`);
-  }
-
-  function groundedWheelCount(s) {
-    return (s.wheelContact || []).filter(c => c !== null).length;
-  }
-
-  function resetEpisode(s, finished) {
-    Trainer.episode++;
-
-    if (finished) {
-      Trainer.finishes = (Trainer.finishes || 0) + 1;
-      console.log(`%c[PolyAI] 🏁 FINISHED! (finish #${Trainer.finishes}) Episode ${Trainer.episode} | Reward: ${Trainer.episodeReward.toFixed(1)}`, 'color: lime; font-weight: bold;');
-    } else {
-      console.log(`[PolyAI] Episode ${Trainer.episode} ended (crashed/stuck). Reward: ${Trainer.episodeReward.toFixed(1)} | Best: ${Trainer.bestReward.toFixed(1)} | Noise: ${Trainer.mutationScale.toFixed(3)}`);
-    }
-
-    if (Trainer.episodeReward > Trainer.bestReward) {
-      Trainer.bestReward = Trainer.episodeReward;
-      Trainer.bestBrain = cloneBrain(Trainer.brain);
-      console.log('[PolyAI] New best brain! Reward:', Trainer.bestReward.toFixed(1));
-    } else if (Trainer.bestBrain) {
-      Trainer.brain = cloneBrain(Trainer.bestBrain);
-    }
-
-    Trainer.mutationScale = Math.max(0.05, 0.4 * Math.pow(0.999, Trainer.episode));
-    Trainer.brain = mutate(Trainer.bestBrain || Trainer.brain, Trainer.mutationScale);
-    Trainer.episodeReward = 0;
-    Trainer.lastCheckpoint = s ? s.nextCheckpointIndex : 0;
-    Trainer.framesSinceProgress = 0;
-    Trainer.lastPos = null;
-
-    saveTraining(Trainer);
-    if (Trainer.carId != null && !deadIds.has(Trainer.carId)) sendControl(Trainer.carId, { reset: true });
-  }
-
-  let tick = 0;
-  setInterval(() => {
-    tick++;
-    const ids = getCarIds();
-    if (!ids.length) return;
-
-    const newestId = Math.max(...ids);
-    if (Trainer.carId !== newestId) {
-      Trainer.carId = newestId;
-      Trainer.lastCheckpoint = 0;
-      Trainer.framesSinceProgress = 0;
-      Trainer.lastPos = null;
-    }
-
-    const s = state[Trainer.carId];
-    if (!s) return;
-
-    if (s.nextCheckpointIndex > Trainer.lastCheckpoint) {
-      recordCheckpointIfNew(Trainer.lastCheckpoint, s.position);
-    }
-
-    let moveDir = { x: 0, z: 1 };
-    if (Trainer.lastPos) {
-      const dx = s.position.x - Trainer.lastPos.x;
-      const dz = s.position.z - Trainer.lastPos.z;
-      const mag = Math.sqrt(dx * dx + dz * dz);
-      if (mag > 0.001) moveDir = { x: dx / mag, z: dz / mag };
-    }
-    Trainer.lastPos = { x: s.position.x, y: s.position.y, z: s.position.z };
-
-    let checkpointAngle = 0, checkpointDist = 1;
-    const target = checkpointPositions[s.nextCheckpointIndex];
-    if (target) {
-      const tx = target.x - s.position.x;
-      const tz = target.z - s.position.z;
-      const tmag = Math.sqrt(tx * tx + tz * tz);
-      checkpointDist = Math.min(tmag / 50, 1);
-      if (tmag > 0.001) {
-        const tdx = tx / tmag, tdz = tz / tmag;
-        const cross = moveDir.x * tdz - moveDir.z * tdx;
-        const dot = moveDir.x * tdx + moveDir.z * tdz;
-        checkpointAngle = Math.atan2(cross, dot) / Math.PI;
-      }
-    }
-
-    const grounded = groundedWheelCount(s);
-    const input = [
-      Math.min(s.speedKmh, 300) / 300,
-      s.steering || 0,
-      grounded / 4,
-      (s.collisionImpulses && s.collisionImpulses.length) ? 1 : 0,
-      Math.min(Trainer.framesSinceProgress, 300) / 300,
-      checkpointAngle,
-      checkpointDist,
-    ];
-
-    const out = forward(Trainer.brain, input);
-    const controls = { up: true, left: out[1] > 0, right: out[2] > 0 };
-    sendControl(Trainer.carId, controls);
-
-    if (s.nextCheckpointIndex > Trainer.lastCheckpoint) {
-      Trainer.episodeReward += 100;
-      Trainer.lastCheckpoint = s.nextCheckpointIndex;
-      Trainer.framesSinceProgress = 0;
-    } else {
-      Trainer.framesSinceProgress++;
-      if (target) Trainer.episodeReward += (1 - Math.abs(checkpointAngle)) * 0.02;
-      if (target && Math.abs(checkpointAngle) < 0.15 && (controls.left || controls.right)) {
-        Trainer.episodeReward -= 0.03;
-      }
-    }
-    Trainer.episodeReward += (s.speedKmh || 0) * 0.01;
-
-    const stuckTooLong = Trainer.framesSinceProgress > 240;
-    const finished = s.finishFrames != null;
-    if (stuckTooLong || finished) {
-      if (finished) Trainer.episodeReward += 500;
-      deadIds.add(Trainer.carId);
-      resetEpisode(s, finished);
-    }
-
-    if (tick % 60 === 0) {
-      console.log(`[PolyAI] car ${Trainer.carId} | speed ${Math.round(s.speedKmh)} | ckpt ${s.nextCheckpointIndex} | angle ${checkpointAngle.toFixed(2)} | reward ${Trainer.episodeReward.toFixed(1)} | episode ${Trainer.episode} | finishes ${Trainer.finishes || 0}`);
-    }
-  }, 16);
-
   window.PolyAI = {
-    getState(carId) { return carId !== undefined ? state[carId] : state[Trainer.carId]; },
-    getCarIds,
-    Trainer,
-    checkpointPositions,
-    getTrackData() {
-      if (capturedTrackData) return capturedTrackData;
-      try {
-        const saved = localStorage.getItem('polyai_captured_track');
-        if (saved) return JSON.parse(saved);
-      } catch (e) {}
-      return null;
-    },
-    getTrackParts() {
-      if (capturedTrackParts) return capturedTrackParts;
-      try {
-        const saved = localStorage.getItem('polyai_captured_trackparts');
-        if (saved) return JSON.parse(saved);
-      } catch (e) {}
-      return null;
-    },
-    downloadTrackData() {
-      const data = this.getTrackData();
-      if (!data) { console.warn('[PolyAI] No track data captured yet.'); return; }
-      const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+    getCheckpoints() { return checkpointPositions; },
+    downloadCheckpoints() {
+      const list = Object.keys(checkpointPositions).map(Number).sort((a, b) => a - b).map(i => checkpointPositions[i]);
+      const blob = new Blob([JSON.stringify(list)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url; a.download = 'track_data.json'; a.click();
-    },
-    downloadTrackParts() {
-      const data = this.getTrackParts();
-      if (!data) { console.warn('[PolyAI] No trackParts captured yet.'); return; }
-      const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = 'track_parts.json'; a.click();
-    },
-    pause() { Trainer.running = false; },
-    resume() { Trainer.running = true; },
-    resetTraining() {
-      localStorage.removeItem(SAVE_KEY);
-      console.log('[PolyAI] Training progress cleared. Reload the page to start fresh.');
+      a.href = url; a.download = 'checkpoints.json'; a.click();
+      console.log('[PolyAI] Downloaded', list.length, 'checkpoints');
     },
   };
 
-  console.log('[PolyAI] Ready (v9: also captures trackParts from Init message).');
+  console.log('[PolyAI] Checkpoint recorder ready (v2, no auto-drive). Drive one full lap manually, then run: PolyAI.downloadCheckpoints()');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
