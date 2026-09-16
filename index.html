@@ -1,11 +1,9 @@
 <!doctype html><html><head><meta charset="utf-8"><link rel="preload" href="forced_square.woff2" as="font" type="font/woff2" crossorigin="anonymous"/><link rel="preload" href="images/logo.svg" as="image" type="image/svg+xml"/><link rel="preload" href="images/discord.svg" as="image" type="image/svg+xml"/><link rel="manifest" href="manifest.json"/><meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
 <script>
 (function () {
-  const state = {};
-  const deadIds = new Set();
   const workerRefs = [];
-  let checkpointPositions = {};
-  window.__lastCkpt = 0;
+  const checkpointsByCar = {};
+  const lastCkptByCar = {};
 
   const OriginalWorker = window.Worker;
   window.Worker = function (...args) {
@@ -13,7 +11,6 @@
     try {
       if (args[0] && String(args[0]).includes('simulation_worker')) {
         workerRefs.push(w);
-        w.addEventListener('error', (e) => { for (const id of Object.keys(state)) deadIds.add(Number(id)); });
         console.log('[PolyAI] captured simulation worker');
       }
     } catch (e) {}
@@ -30,15 +27,16 @@
         try {
           const arg = args[0];
           if (arg && typeof arg === 'object' && 'speedKmh' in arg && 'position' in arg) {
-            state[key] = arg;
-            deadIds.delete(key);
-            if (arg.nextCheckpointIndex > window.__lastCkpt || checkpointPositions[0] == null) {
-              const idx = arg.nextCheckpointIndex - 1 >= 0 ? arg.nextCheckpointIndex - 1 : 0;
-              if (checkpointPositions[idx] == null) {
-                checkpointPositions[idx] = { x: arg.position.x, z: arg.position.z };
-                console.log(`%c[PolyAI] Recorded checkpoint ${idx}: x=${arg.position.x.toFixed(1)}, z=${arg.position.z.toFixed(1)}`, 'color: lime');
+            if (!checkpointsByCar[key]) checkpointsByCar[key] = {};
+            const lastForThisCar = lastCkptByCar[key] ?? -1;
+
+            if (arg.nextCheckpointIndex > lastForThisCar) {
+              const idx = Math.max(0, arg.nextCheckpointIndex - 1);
+              if (checkpointsByCar[key][idx] == null) {
+                checkpointsByCar[key][idx] = { x: arg.position.x, z: arg.position.z };
+                console.log(`%c[PolyAI] car ${key}: recorded checkpoint ${idx} (total for this car: ${Object.keys(checkpointsByCar[key]).length})`, 'color: lime');
               }
-              window.__lastCkpt = arg.nextCheckpointIndex;
+              lastCkptByCar[key] = arg.nextCheckpointIndex;
             }
           }
         } catch (e) {}
@@ -51,18 +49,31 @@
   };
 
   window.PolyAI = {
-    getCheckpoints() { return checkpointPositions; },
-    downloadCheckpoints() {
-      const list = Object.keys(checkpointPositions).map(Number).sort((a, b) => a - b).map(i => checkpointPositions[i]);
+    listCars() {
+      const summary = {};
+      for (const id of Object.keys(checkpointsByCar)) summary[id] = Object.keys(checkpointsByCar[id]).length;
+      console.log('[PolyAI] Checkpoints recorded per car:', summary);
+      return summary;
+    },
+    downloadCheckpoints(carId) {
+      let id = carId;
+      if (id === undefined) {
+        // default: pick whichever car has the MOST recorded checkpoints (likely the real player)
+        id = Object.keys(checkpointsByCar).reduce((best, k) =>
+          Object.keys(checkpointsByCar[k]).length > Object.keys(checkpointsByCar[best] || {}).length ? k : best, Object.keys(checkpointsByCar)[0]);
+      }
+      const data = checkpointsByCar[id];
+      if (!data) { console.warn('[PolyAI] No data for car', id); return; }
+      const list = Object.keys(data).map(Number).sort((a, b) => a - b).map(i => data[i]);
       const blob = new Blob([JSON.stringify(list)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = 'checkpoints.json'; a.click();
-      console.log('[PolyAI] Downloaded', list.length, 'checkpoints');
+      console.log(`[PolyAI] Downloaded ${list.length} checkpoints from car ${id}`);
     },
   };
 
-  console.log('[PolyAI] Checkpoint recorder ready (v2, no auto-drive). Drive one full lap manually, then run: PolyAI.downloadCheckpoints()');
+  console.log('[PolyAI] Checkpoint recorder ready (v3, per-car tracking). Drive a full lap, then run PolyAI.listCars() to see counts, then PolyAI.downloadCheckpoints()');
 })();
 </script>
 <script defer="defer" src="error_screen.bundle.js"></script><script defer="defer" src="main.bundle.js"></script></head><body><canvas id="screen"></canvas><div id="ui"></div><div id="transition-layer"></div></body></html>
